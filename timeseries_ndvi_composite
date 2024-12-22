@@ -1,0 +1,66 @@
+var aoi = ee.Geometry.Rectangle([75.5, 23.5, 76.5, 24.5]); 
+// Filter Sentinel-2 SR collection
+var start_date = '2023-11-01';
+var end_date = '2023-12-15';
+var collection = ee.ImageCollection('COPERNICUS/S2_SR')
+  .filterBounds(aoi)
+  .filterDate(start_date, end_date) // Define your time range
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)); // Less than 20% cloud cover
+print(collection);
+// Function to calculate NDVI
+var calculateNDVI = function(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  return ndvi.copyProperties(image, ['system:time_start']);
+};
+
+// Map over collection to calculate NDVI
+var ndviCollection = collection.map(calculateNDVI);
+
+// Define biweekly intervals
+var biweeklyIntervals = ee.List.sequence(0, 365, 15); // Every 15 days
+
+// Function to process each fortnight
+var processFortnight = function(startDay) {
+  var start = ee.Date(start_date).advance(startDay, 'day');
+  var end = start.advance(15, 'day');
+  var filtered = ndviCollection.filterDate(start, end);
+
+  // Mosaic all images in the fortnight
+  var mosaicked = filtered.mosaic().clip(aoi);
+
+  // Create band name based on dates
+  var dates = filtered.aggregate_array('system:time_start')
+    .map(function(millis) {
+      return ee.Date(millis).format('yyyyMMdd');
+    });
+  var bandName = ee.String(dates.join('_'));
+
+  // Return the mosaicked image with renamed band
+  return mosaicked.rename(bandName).set('band_name', bandName);
+};
+
+// Process each fortnight and create a stacked NDVI
+var fortnightlyNDVI = biweeklyIntervals.map(processFortnight);
+
+var stackedNDVI = ee.ImageCollection(fortnightlyNDVI).toBands();
+print(stackedNDVI);
+// Flatten band names
+var bandNames = stackedNDVI.bandNames().map(function(name) {
+  return ee.String(name).split('_').get(1); // Remove "0_" prefix from band names
+});
+stackedNDVI = stackedNDVI.rename(bandNames);
+print(stackedNDVI);
+// Display result
+Map.centerObject(aoi, 8);
+//Map.addLayer(fortnightlyNDVI);
+Map.addLayer(stackedNDVI, {}, 'Fortnightly Stacked NDVI');
+
+// Export the stacked NDVI image to Drive
+Export.image.toDrive({
+  image: stackedNDVI,
+  description: 'Fortnightly_stacked_NDVI',
+  folder: 'stacked_NDVI',
+  region: aoi,
+  scale: 10,
+  maxPixels: 1e9
+});
